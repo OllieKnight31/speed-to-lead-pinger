@@ -1,7 +1,8 @@
 name: Deal Engine — speed-to-lead check
 
 # Vercel Hobby only allows one cron per day, so the 5-minute cadence lives here.
-# GitHub's minimum schedule granularity is 5 minutes.
+# GitHub's minimum schedule granularity is 5 minutes. A daily Vercel cron calls the
+# same endpoint as a backstop, and keepalive.yml stops GitHub disabling this schedule.
 on:
   schedule:
     - cron: '*/5 * * * *'
@@ -11,16 +12,26 @@ jobs:
   escalate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check for unclaimed DFY leads
+      - name: Check for leads that have not been dialled
         run: |
           code=$(curl -s -o /tmp/out.json -w '%{http_code}' \
             -X POST "${{ secrets.RELAY_ESCALATE_URL }}" \
             -H "Authorization: Bearer ${{ secrets.ESCALATE_SECRET }}" \
-            --max-time 30)
+            --retry 2 --retry-delay 5 --max-time 40)
           echo "HTTP $code"
           cat /tmp/out.json
           echo
           if [ "$code" != "200" ]; then
             echo "::error::escalate endpoint returned $code"
             exit 1
+          fi
+
+      # If the monitor itself is broken, nobody would otherwise know — alerts just stop.
+      # Throttled to the first run of each hour so an outage is loud but not 288 posts a day.
+      - name: Alarm — the monitor is failing
+        if: failure()
+        run: |
+          if [ "$(date -u +%M)" -lt 5 ] && [ -n "${{ secrets.SLACK_ALERT_WEBHOOK }}" ]; then
+            curl -s -X POST "${{ secrets.SLACK_ALERT_WEBHOOK }}" -H 'Content-Type: application/json' \
+              -d '{"text":"🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. Check https://github.com/OllieKnight31/speed-to-lead-pinger/actions"}'
           fi
