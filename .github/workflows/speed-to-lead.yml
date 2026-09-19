@@ -1,37 +1,53 @@
 name: Deal Engine — speed-to-lead check
 
-# Vercel Hobby only allows one cron per day, so the 5-minute cadence lives here.
-# GitHub's minimum schedule granularity is 5 minutes. A daily Vercel cron calls the
-# same endpoint as a backstop, and keepalive.yml stops GitHub disabling this schedule.
+# WHY THIS IS A LOOP AND NOT JUST A CRON
+# GitHub's `schedule` trigger is best-effort. On this repo a `*/5` cron went live and did
+# not fire ONCE in its first two hours. A 5-minute speed-to-lead alert cannot hang off that.
+# So the cadence lives INSIDE the job: check, sleep 5 min, repeat for ~55 min, then dispatch
+# the next run ourselves. The cron below is only a restarter in case the chain ever breaks,
+# and Vercel's daily cron is the backstop behind that. `concurrency` guarantees a single
+# live loop however many triggers pile up.
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
+
+concurrency:
+  group: speed-to-lead-loop
+  cancel-in-progress: false
+
+permissions:
+  actions: write        # lets the run dispatch its successor
 
 jobs:
   escalate:
     runs-on: ubuntu-latest
+    timeout-minutes: 70
     steps:
-      - name: Check for leads that have not been dialled
+      - name: Check every 5 minutes for leads that have not been dialled
+        env:
+          URL: ${{ secrets.RELAY_ESCALATE_URL }}
+          KEY: ${{ secrets.ESCALATE_SECRET }}
+          ALERT: ${{ secrets.SLACK_ALERT_WEBHOOK }}
         run: |
-          code=$(curl -s -o /tmp/out.json -w '%{http_code}' \
-            -X POST "${{ secrets.RELAY_ESCALATE_URL }}" \
-            -H "Authorization: Bearer ${{ secrets.ESCALATE_SECRET }}" \
-            --retry 2 --retry-delay 5 --max-time 40)
-          echo "HTTP $code"
-          cat /tmp/out.json
-          echo
-          if [ "$code" != "200" ]; then
-            echo "::error::escalate endpoint returned $code"
-            exit 1
-          fi
+          fails=0; alarmed=0
+          for i in $(seq 1 11); do
+            code=$(curl -s -o /tmp/out.json -w '%{http_code}' -X POST "$URL" \
+              -H "Authorization: Bearer $KEY" --retry 2 --retry-delay 5 --max-time 40)
+            echo "[$(date -u +%H:%M:%S)] check $i/11 -> HTTP $code $(head -c 300 /tmp/out.json)"
+            if [ "$code" = "200" ]; then fails=0; else fails=$((fails+1)); fi
+            # Three misses in a row = the monitor itself is broken. Say so once per run —
+            # otherwise alerts simply stop and nobody knows.
+            if [ "$fails" -ge 3 ] && [ "$alarmed" = "0" ] && [ -n "$ALERT" ]; then
+              curl -s -X POST "$ALERT" -H 'Content-Type: application/json' \
+                -d '{"text":"🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. https://github.com/OllieKnight31/speed-to-lead-pinger/actions"}' >/dev/null
+              alarmed=1
+            fi
+            [ "$i" -lt 11 ] && sleep 300
+          done
 
-      # If the monitor itself is broken, nobody would otherwise know — alerts just stop.
-      # Throttled to the first run of each hour so an outage is loud but not 288 posts a day.
-      - name: Alarm — the monitor is failing
-        if: failure()
-        run: |
-          if [ "$(date -u +%M)" -lt 5 ] && [ -n "${{ secrets.SLACK_ALERT_WEBHOOK }}" ]; then
-            curl -s -X POST "${{ secrets.SLACK_ALERT_WEBHOOK }}" -H 'Content-Type: application/json' \
-              -d '{"text":"🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. Check https://github.com/OllieKnight31/speed-to-lead-pinger/actions"}'
-          fi
+      - name: Hand off to the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run speed-to-lead.yml --repo "$GITHUB_REPOSITORY" --ref main
