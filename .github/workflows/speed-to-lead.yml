@@ -1,0 +1,26 @@
+name: Deal Engine — speed-to-lead check
+
+# Vercel Hobby only allows one cron per day, so the 5-minute cadence lives here.
+# GitHub's minimum schedule granularity is 5 minutes.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  escalate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for unclaimed DFY leads
+        run: |
+          code=$(curl -s -o /tmp/out.json -w '%{http_code}' \
+            -X POST "${{ secrets.RELAY_ESCALATE_URL }}" \
+            -H "Authorization: Bearer ${{ secrets.ESCALATE_SECRET }}" \
+            --max-time 30)
+          echo "HTTP $code"
+          cat /tmp/out.json
+          echo
+          if [ "$code" != "200" ]; then
+            echo "::error::escalate endpoint returned $code"
+            exit 1
+          fi
