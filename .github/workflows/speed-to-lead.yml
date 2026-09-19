@@ -48,8 +48,12 @@ jobs:
                 -d '{"text":"🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. https://github.com/OllieKnight31/speed-to-lead-pinger/actions"}' >/dev/null
               alarmed=1
             fi
-            [ "$i" -lt "$CHECKS" ] && sleep "$INTERVAL"
+            if [ "$i" -lt "$CHECKS" ]; then sleep "$INTERVAL"; fi
           done
+          # `[ … ] && sleep` as the loop's last command returned 1 on the final pass and
+          # marked every healthy run as failed. Be explicit: red only if the checks were failing.
+          if [ "$fails" -ge 3 ]; then echo "::error::escalate endpoint failing"; exit 1; fi
+          exit 0
 
       # Hand off after success OR failure, but never after a cancel: a human cancelling a run
       # must be able to stop the chain. If GitHub itself kills a run, the */15 cron restarts it.
