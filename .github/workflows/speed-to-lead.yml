@@ -51,8 +51,10 @@ jobs:
             [ "$i" -lt "$CHECKS" ] && sleep "$INTERVAL"
           done
 
+      # Hand off after success OR failure, but never after a cancel: a human cancelling a run
+      # must be able to stop the chain. If GitHub itself kills a run, the */15 cron restarts it.
       - name: Hand off to the next run
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run speed-to-lead.yml --repo "$GITHUB_REPOSITORY" --ref main
