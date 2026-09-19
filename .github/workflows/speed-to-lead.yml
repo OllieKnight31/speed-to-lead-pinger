@@ -10,7 +10,10 @@ name: Deal Engine — speed-to-lead check
 on:
   schedule:
     - cron: '*/15 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      checks:   { description: 'checks per run (default 11 ≈ 55 min)', default: '11' }
+      interval: { description: 'seconds between checks (default 300)',  default: '300' }
 
 concurrency:
   group: speed-to-lead-loop
@@ -29,12 +32,14 @@ jobs:
           URL: ${{ secrets.RELAY_ESCALATE_URL }}
           KEY: ${{ secrets.ESCALATE_SECRET }}
           ALERT: ${{ secrets.SLACK_ALERT_WEBHOOK }}
+          CHECKS: ${{ inputs.checks || '11' }}
+          INTERVAL: ${{ inputs.interval || '300' }}
         run: |
           fails=0; alarmed=0
-          for i in $(seq 1 11); do
+          for i in $(seq 1 "$CHECKS"); do
             code=$(curl -s -o /tmp/out.json -w '%{http_code}' -X POST "$URL" \
               -H "Authorization: Bearer $KEY" --retry 2 --retry-delay 5 --max-time 40)
-            echo "[$(date -u +%H:%M:%S)] check $i/11 -> HTTP $code $(head -c 300 /tmp/out.json)"
+            echo "[$(date -u +%H:%M:%S)] check $i/$CHECKS -> HTTP $code $(head -c 300 /tmp/out.json)"
             if [ "$code" = "200" ]; then fails=0; else fails=$((fails+1)); fi
             # Three misses in a row = the monitor itself is broken. Say so once per run —
             # otherwise alerts simply stop and nobody knows.
@@ -43,7 +48,7 @@ jobs:
                 -d '{"text":"🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. https://github.com/OllieKnight31/speed-to-lead-pinger/actions"}' >/dev/null
               alarmed=1
             fi
-            [ "$i" -lt 11 ] && sleep 300
+            [ "$i" -lt "$CHECKS" ] && sleep "$INTERVAL"
           done
 
       - name: Hand off to the next run
