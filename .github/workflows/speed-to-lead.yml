@@ -32,6 +32,11 @@ jobs:
           URL: ${{ secrets.RELAY_ESCALATE_URL }}
           KEY: ${{ secrets.ESCALATE_SECRET }}
           ALERT: ${{ secrets.SLACK_ALERT_WEBHOOK }}
+          # The alarm goes to #5-ops-alerts by bot token, so it lands with every other
+          # automation failure instead of wherever a webhook happened to be minted for.
+          # The webhook above is only the fallback if the bot post is rejected.
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ALERT_CHANNEL: C0C2TKXLV6W
           CHECKS: ${{ inputs.checks || '11' }}
           INTERVAL: ${{ inputs.interval || '300' }}
         run: |
@@ -43,9 +48,21 @@ jobs:
             if [ "$code" = "200" ]; then fails=0; else fails=$((fails+1)); fi
             # Three misses in a row = the monitor itself is broken. Say so once per run —
             # otherwise alerts simply stop and nobody knows.
-            if [ "$fails" -ge 3 ] && [ "$alarmed" = "0" ] && [ -n "$ALERT" ]; then
-              curl -s -X POST "$ALERT" -H 'Content-Type: application/json' \
-                -d '{"text":"🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. https://github.com/OllieKnight31/speed-to-lead-pinger/actions"}' >/dev/null
+            if [ "$fails" -ge 3 ] && [ "$alarmed" = "0" ]; then
+              MSG='🚨 <@U0C1G6P32BG> <@U0C0TPJG4TT> *The speed-to-lead monitor is failing.* Un-dialled leads are NOT being alerted right now. https://github.com/OllieKnight31/speed-to-lead-pinger/actions'
+              sent=0
+              if [ -n "$SLACK_BOT_TOKEN" ]; then
+                ok=$(curl -s -X POST https://slack.com/api/chat.postMessage \
+                  -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json; charset=utf-8' \
+                  -d "{\"channel\":\"$ALERT_CHANNEL\",\"username\":\"Deal Engine\",\"icon_emoji\":\":house:\",\"text\":\"$MSG\"}" \
+                  | grep -o '"ok":true' || true)
+                [ -n "$ok" ] && sent=1
+              fi
+              if [ "$sent" = "0" ] && [ -n "$ALERT" ]; then
+                curl -s -X POST "$ALERT" -H 'Content-Type: application/json' -d "{\"text\":\"$MSG\"}" >/dev/null
+                sent=1
+              fi
+              [ "$sent" = "0" ] && echo "::error::monitor failing AND no way to alarm - no SLACK_BOT_TOKEN, no SLACK_ALERT_WEBHOOK"
               alarmed=1
             fi
             if [ "$i" -lt "$CHECKS" ]; then sleep "$INTERVAL"; fi
